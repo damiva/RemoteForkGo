@@ -124,11 +124,11 @@ func (s ServerLua) header(L *lua.LState) int {
 	return 0
 }
 func (s ServerLua) file(L *lua.LState) int {
-	var wrt = os.O_CREATE | os.O_WRONLY
+	var wrt = os.O_CREATE | os.O_WRONLY | os.O_TRUNC
 	switch L.GetTop() {
 	case 3:
 		if L.ToBool(3) {
-			wrt = os.O_APPEND | wrt
+			wrt = os.O_CREATE | os.O_WRONLY | os.O_APPEND
 		}
 		fallthrough
 	case 2:
@@ -137,7 +137,7 @@ func (s ServerLua) file(L *lua.LState) int {
 		var n int
 		if L.CheckAny(2).Type() == lua.LTNil {
 			e = os.Remove(filepath.Join(s.Plug, filepath.Clean(L.ToString(1))))
-		} else if f, e = os.OpenFile(filepath.Join(s.Plug, filepath.Clean(L.ToString(1))), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666); e == nil {
+		} else if f, e = os.OpenFile(filepath.Join(s.Plug, filepath.Clean(L.ToString(1))), wrt, 0666); e == nil {
 			n, e = f.WriteString(L.ToString(2))
 			f.Close()
 		}
