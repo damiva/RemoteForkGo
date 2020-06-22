@@ -1,7 +1,8 @@
-package main
+package rfgo
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"io/ioutil"
 	"net/http"
 	"net/url"
@@ -19,12 +20,16 @@ import (
 type ServerLua struct {
 	W      http.ResponseWriter
 	R      *http.Request
+	Root   string
 	Plug   string
 	Script string
 	After  string
+	EPsV   string
 	//Vars   map[string]string
 	//p bool
 }
+
+var serverMemory = map[string]map[string]string{}
 
 // Loader is ServerLua module loader
 func (s ServerLua) Loader(L *lua.LState) int {
@@ -36,19 +41,20 @@ func (s ServerLua) Loader(L *lua.LState) int {
 		"log_inf": s.logInf,
 		"log_wrn": s.logWrn,
 		"log_err": s.logErr,
-		"log_dbg": s.logDbg,
 		"enc64":   s.enc64,
 		"dec64":   s.dec64,
 		"decuri":  s.decuri,
 		"encuri":  s.encuri,
+		"memory":  s.memory,
 	})
-	L.SetField(mod, "version", lua.LString(myVers))
+	L.SetField(mod, "version_core", lua.LString(MyVers))
+	L.SetField(mod, "version_eps", lua.LString(s.EPsV))
 	L.SetField(mod, "method", lua.LString(s.R.Method))
 	L.SetField(mod, "remote_addr", lua.LString(s.R.RemoteAddr))
 	L.SetField(mod, "url", lua.LString("http://"+s.R.Host+s.R.RequestURI))
 	L.SetField(mod, "host", lua.LString(s.R.Host))
-	L.SetField(mod, "url_root", lua.LString("http://"+s.R.Host+pthTree+s.Plug))
-	L.SetField(mod, "path_root", lua.LString(pthTree+s.Plug))
+	L.SetField(mod, "url_root", lua.LString("http://"+s.R.Host+s.Root+s.Plug))
+	L.SetField(mod, "path_root", lua.LString(s.Root+s.Plug))
 	L.SetField(mod, "path_script", lua.LString(s.Script))
 	L.SetField(mod, "path_info", lua.LString(s.After))
 	L.SetField(mod, "query_string", lua.LString(s.R.URL.RawQuery))
@@ -193,30 +199,55 @@ func (s ServerLua) decuri(L *lua.LState) int {
 	return 2
 }
 func (s ServerLua) logInf(L *lua.LState) int {
-	log.Info(L.ToString(1))
+	LogInf(L.ToString(1))
 	return 0
 }
 func (s ServerLua) logWrn(L *lua.LState) int {
-	log.Warning(L.ToString(1))
+	LogWrn(L.ToString(1))
 	return 0
 }
 func (s ServerLua) logErr(L *lua.LState) int {
-	log.Error(L.ToString(1))
+	LogErr(L.ToString(1))
 	return 0
 }
-func (s ServerLua) logDbg(L *lua.LState) int {
-	if mySelf.Debug {
-		log.Info(L.ToString(1))
+func (s ServerLua) memory(L *lua.LState) int {
+	plg := s.Plug
+	if plg == "" {
+		plg = "0"
+	}
+	switch L.GetTop() {
+	case 1:
+		if _, o := serverMemory[plg]; o {
+			if v, o := serverMemory[plg][L.ToString(1)]; o {
+				L.Push(lua.LString(v))
+				return 1
+			}
+		}
+	case 0:
+		if _, o := serverMemory[plg]; o {
+			delete(serverMemory, plg)
+		}
+	case 2:
+		vrn := L.ToString(1)
+		if L.CheckAny(2).Type() == lua.LTNil {
+			if _, o := serverMemory[plg]; o {
+				if _, o = serverMemory[plg][vrn]; o {
+					delete(serverMemory[plg], vrn)
+				}
+			}
+		} else {
+			if _, o := serverMemory[plg]; o {
+				serverMemory[plg][vrn] = L.ToString(2)
+			} else {
+				serverMemory[plg] = map[string]string{vrn: L.ToString(2)}
+			}
+		}
 	}
 	return 0
 }
 
 // run lua:
 func serveLua(w http.ResponseWriter, r *http.Request, file, plug, script, after string) {
-	doFile := func(L *lua.LState) int {
-		check(L.DoFile(filepath.Join(plug, filepath.FromSlash(L.ToString(1)))), true)
-		return 0
-	}
 	//L := lua.NewState()
 	L := lua.NewState(lua.Options{SkipOpenLibs: true})
 	defer L.Close()
@@ -236,9 +267,24 @@ func serveLua(w http.ResponseWriter, r *http.Request, file, plug, script, after 
 			Protect: true,
 		}, lua.LString(pair.n)), true)
 	}
-	L.SetGlobal("dofile", L.NewFunction(doFile))
-	L.PreloadModule("server", ServerLua{W: w, R: r, Plug: plug, Script: script, After: after}.Loader)
+	L.SetGlobal("dofile", L.NewFunction(func(L *lua.LState) int {
+		check(L.DoFile(filepath.Join(plug, filepath.FromSlash(L.ToString(1)))), true)
+		return 0
+	}))
+	rt := pthTree
+	if plug == "" {
+		rt = ""
+	}
+	epsv := ""
+	if m, e := ioutil.ReadFile(plgInfoFile); e == nil && len(m) > 0 {
+		var i plgManifest
+		if json.Unmarshal(m, &i) == nil {
+			epsv = i.Git.Tag
+		}
+	}
+	L.PreloadModule("server", ServerLua{w, r, rt, plug, script, after, epsv}.Loader)
 	L.PreloadModule("http", gluahttp.NewHttpModule(&http.Client{}).Loader)
+	L.PreloadModule("http_nfr", gluahttp.NewHttpModule(&http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }}).Loader)
 	L.PreloadModule("url", gluaurl.Loader)
 	//L.PreloadModule("scrape", gluahttpscrape.NewHttpScrapeModule().Loader)
 	luajson.Preload(L)
